@@ -29,8 +29,10 @@ contract Roulette is IEntropyConsumer {
 
     mapping(uint64 => address) users;
 
-    event Spin(address indexed user, bytes32 userRandomNumber, uint64 sequenceNumber);
-    event Swap(address indexed user, int256 finalNumber, address tokenOut, uint256 amountOut);
+    event Spin(address indexed user, uint64 sequenceNumber, bytes32 userRandomNumber);
+    event Swap(address indexed user, uint64 sequenceNumber, int256 finalNumber, address tokenOut, uint256 amountOut);
+
+    error XTZWrapFailed();
 
     constructor(
         address entropyAddress,
@@ -49,13 +51,17 @@ contract Roulette is IEntropyConsumer {
         WXTZ.approve(router, type(uint256).max);
     }
 
-    function spin(bytes32 userRandomNumber) external payable {
+    function spin(bytes32 userRandomNumber) external payable returns (uint64) {
         uint256 fee = getFee();
 
-        require(msg.value == fee);
+        require(msg.value == fee + AMOUNT);
 
-        // Transfer WXTZ from the sender to this contract
-        WXTZ.transferFrom(msg.sender, address(this), AMOUNT);
+        // deposit xtz for wxtz
+        (bool success,) = address(WXTZ).call{value: AMOUNT}("");
+        if (!success) revert XTZWrapFailed();
+
+        // // Transfer WXTZ from the sender to this contract
+        // WXTZ.transferFrom(msg.sender, address(this), AMOUNT);
 
         // Request the random number with the callback
         uint64 sequenceNumber = entropy.requestWithCallback{value: fee}(
@@ -66,7 +72,8 @@ contract Roulette is IEntropyConsumer {
         // Store the sequence number to identify the callback request
         users[sequenceNumber] = msg.sender;
 
-        emit Spin(msg.sender, userRandomNumber, sequenceNumber);
+        emit Spin(msg.sender, sequenceNumber, userRandomNumber);
+        return sequenceNumber;
     }
 
     // It is called by the entropy contract when a random number is generated.
@@ -103,7 +110,7 @@ contract Roulette is IEntropyConsumer {
         // The call to `exactInputSingle` executes the swap.
         uint256 amountOut = swapRouter.exactInputSingle(params);
 
-        emit Swap(users[sequenceNumber], finalNumber, tokenOut, amountOut);
+        emit Swap(users[sequenceNumber], sequenceNumber, finalNumber, tokenOut, amountOut);
 
         delete users[sequenceNumber]; // reset
     }

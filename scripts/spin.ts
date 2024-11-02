@@ -7,19 +7,66 @@ async function main() {
     return;
   }
   const roulette = await ethers.getContractAt("Roulette", address);
-  const WXTZ = await ethers.getContractAt("IERC20", network.name === "etherlink" ? '0xc9B53AB2679f573e480d01e0f49e2B5CFB7a3EAb' : '0xB1Ea698633d57705e93b0E40c1077d46CD6A51d8');
-
   console.log("Roulette:", await roulette.getAddress());
-
-  // allow my WXTZ
-  console.log("Allowing roulette to take 10 WXTZ...");
-  await (await WXTZ.approve(await roulette.getAddress(), ethers.parseUnits("10", "ether"))).wait();
 
   const randomNumber = ethers.randomBytes(32);
   const fee = await roulette.getFee();
-  console.log('Fees to pay', fee);
-  const tx = await roulette.spin(randomNumber, {value: fee.toString()});
-  const txReceipt = await tx.wait();
+  console.log('Fees to pay:', fee);
+  console.log('Spinning the roulette...');
+
+  const tx = await roulette.spin(randomNumber, { value: (fee + ethers.parseEther('10')).toString() });
+  const receipt = await tx.wait();
+
+  // Access the Spin event and get sequence number
+  const spinEvent = receipt?.logs
+    .map(log => roulette.interface.parseLog(log))
+    .find(log => log?.name === "Spin");
+
+  if (!spinEvent) {
+    console.log("Spin event not found in transaction receipt");
+    return;
+  }
+
+  const spinSequenceNumber = spinEvent.args.sequenceNumber;
+  console.log("Spin event detected:");
+  console.log("User:", spinEvent.args.user);
+  console.log("Sequence Number:", spinSequenceNumber.toString());
+  console.log("User's random number:", spinEvent.args.userRandomNumber);
+
+  // Promise to wait for Swap event with correct sequence number
+  console.log("Waiting for Swap event...");
+
+  const swapEventPromise = new Promise((resolve, reject) => {
+    let swapContractEvent = roulette.getEvent("Swap");
+    const timeout = setTimeout(() => {
+      roulette.off(swapContractEvent); // Remove listener if timed out
+      reject(new Error("Swap event not received within timeout"));
+    }, 2 * 60 * 1000); // 2 minutes
+
+    // Listen for the Swap event with the correct filter
+    roulette.on(swapContractEvent, (user, swapSequenceNumber, finalNumber, tokenOut, amountOut) => {
+      if (spinSequenceNumber == swapSequenceNumber) {
+        clearTimeout(timeout); // Clear timeout once the event is received
+        roulette.off(swapContractEvent);  // Clean up all listeners after resolving
+        console.log("Swap event detected with matching sequence number:");
+        console.log("User:", user);
+        console.log("Swap sequence number:", swapSequenceNumber.toString());
+        console.log("Final number:", finalNumber);
+        console.log("Token out address:", tokenOut);
+        console.log("Amount out:", amountOut);
+        resolve({ user, swapSequenceNumber, finalNumber, tokenOut, amountOut });  // Resolve the promise with event args
+      } else {
+        console.log("Received Swap event with non-matching sequence number:", swapSequenceNumber.toString());
+      }
+    });
+  });
+
+  try {
+    const swapEvent = await swapEventPromise;
+    console.log("Swap event received:", swapEvent);
+  } catch (error: any) {
+    console.error("Error:", error.message);
+  }
 }
 
 main().catch((error) => {
