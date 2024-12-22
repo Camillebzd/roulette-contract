@@ -27,7 +27,12 @@ const config: HardhatUserConfig = {
   defaultNetwork: "hardhat",
   networks: {
     hardhat: {
-      chainId: 31337,
+      forking: {
+        // eslint-disable-next-line
+        enabled: true,
+        url: ETHERLINK_TESTNET_RPC_URL,
+      },
+      // chainId: 31337,
     },
     localhost: {
       url: "http://127.0.0.1:8545/",

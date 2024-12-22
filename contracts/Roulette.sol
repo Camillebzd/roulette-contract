@@ -11,28 +11,54 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 // iswap router
 import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
 
+// iwxtz
+import {IWXTZ} from "./interfaces/IWXTZ.sol";
+
 // Uncomment this line to use console.log
 // import "hardhat/console.sol";
 
 contract Roulette is IEntropyConsumer {
-    uint256 constant AMOUNT = 10 ether;
+    uint256 public constant AMOUNT = 1 ether;
 
-    IEntropy entropy;
-    address entropyProvider;
+    IEntropy public entropy;
+    address public entropyProvider;
 
-    IERC20 immutable WXTZ;
-    IERC20 immutable USDC;
-    IERC20 immutable WETH;
+    IWXTZ immutable public WXTZ;
+    IERC20 immutable public USDC;
+    IERC20 immutable public WETH;
     uint24 public constant poolFee = 500; // 0.05% used on Iguana
 
     ISwapRouter public immutable swapRouter;
 
     mapping(uint64 => address) users;
 
-    event Spin(address indexed user, uint64 sequenceNumber, bytes32 userRandomNumber);
-    event Swap(address indexed user, uint64 sequenceNumber, int256 finalNumber, address tokenOut, uint256 amountOut);
+    event Spin(
+        address indexed user,
+        uint64 sequenceNumber,
+        bytes32 userRandomNumber
+    );
+    event Swap(
+        address indexed user,
+        uint64 sequenceNumber,
+        uint256 finalNumber,
+        address tokenOut,
+        uint256 amountOut
+    );
+    event Lost(
+        address indexed user,
+        uint64 sequenceNumber,
+        uint256 finalNumber
+    );
+    event DoubleWin(
+        address indexed user,
+        uint64 sequenceNumber,
+        uint256 finalNumber,
+        uint256 doubledAmount
+    );
 
+    error NotRightAmount();
     error XTZWrapFailed();
+    error FailedToSendXTZ();
 
     constructor(
         address entropyAddress,
@@ -44,24 +70,24 @@ contract Roulette is IEntropyConsumer {
         entropy = IEntropy(entropyAddress);
         entropyProvider = entropy.getDefaultProvider();
         swapRouter = ISwapRouter(router);
-        WXTZ = IERC20(_wxtz);
+        WXTZ = IWXTZ(_wxtz);
         USDC = IERC20(_usdc);
         WETH = IERC20(_weth);
         // approve the router for wxtz
         WXTZ.approve(router, type(uint256).max);
     }
 
+    receive() external payable {}
+
     function spin(bytes32 userRandomNumber) external payable returns (uint64) {
+        // Pyth fees
         uint256 fee = getFee();
 
-        require(msg.value == fee + AMOUNT);
+        if (msg.value != fee + AMOUNT) revert NotRightAmount();
 
         // deposit xtz for wxtz
-        (bool success,) = address(WXTZ).call{value: AMOUNT}("");
+        (bool success, ) = address(WXTZ).call{value: AMOUNT}("");
         if (!success) revert XTZWrapFailed();
-
-        // // Transfer WXTZ from the sender to this contract
-        // WXTZ.transferFrom(msg.sender, address(this), AMOUNT);
 
         // Request the random number with the callback
         uint64 sequenceNumber = entropy.requestWithCallback{value: fee}(
@@ -76,43 +102,28 @@ contract Roulette is IEntropyConsumer {
         return sequenceNumber;
     }
 
+    // TEST ONLY, remove on real contract
+    function testTriggerCallback(uint64 sequenceNumber, bytes32 randomNumber) external {
+        entropyCallback(sequenceNumber, entropyProvider, randomNumber);
+    }
+
     // It is called by the entropy contract when a random number is generated.
     function entropyCallback(
         uint64 sequenceNumber,
         address /* provider */,
         bytes32 randomNumber
     ) internal override {
-        int256 finalNumber = mapRandomNumber(randomNumber, 1, 100);
-        address tokenOut;
+        uint256 finalNumber = mapRandomNumber(randomNumber, 1, 100);
+        address user = users[sequenceNumber];
 
-        if (finalNumber <= 50) {
-            // wxtz -> usdc
-            tokenOut = address(USDC);
+        if (finalNumber <= 10) {
+            emit Lost(user, sequenceNumber, finalNumber);
+        } else if (finalNumber >= 90) {
+            doubleReward(user, sequenceNumber, finalNumber);
         } else {
-            // wxtz -> weth
-            tokenOut = address(WETH);
+            swap(user, sequenceNumber, finalNumber);
         }
-
-        // Naively set amountOutMinimum to 0. In production, use an oracle or other data source to choose a safer value for amountOutMinimum.
-        // We also set the sqrtPriceLimitx96 to be 0 to ensure we swap our exact input amount.
-        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter
-            .ExactInputSingleParams({
-                tokenIn: address(WXTZ),
-                tokenOut: tokenOut,
-                fee: poolFee,
-                recipient: users[sequenceNumber],
-                deadline: block.timestamp,
-                amountIn: AMOUNT,
-                amountOutMinimum: 0,
-                sqrtPriceLimitX96: 0
-            });
-
-        // The call to `exactInputSingle` executes the swap.
-        uint256 amountOut = swapRouter.exactInputSingle(params);
-
-        emit Swap(users[sequenceNumber], sequenceNumber, finalNumber, tokenOut, amountOut);
-
-        delete users[sequenceNumber]; // reset
+        delete users[sequenceNumber];
     }
 
     // This method is required by the IEntropyConsumer interface.
@@ -130,11 +141,48 @@ contract Roulette is IEntropyConsumer {
     // Maps a random number into a range between minRange and maxRange (inclusive)
     function mapRandomNumber(
         bytes32 randomNumber,
-        int256 minRange,
-        int256 maxRange
-    ) internal pure returns (int256) {
+        uint256 minRange,
+        uint256 maxRange
+    ) internal pure returns (uint256) {
         uint256 range = uint256(maxRange - minRange + 1);
 
-        return minRange + int256(uint256(randomNumber) % range);
+        return minRange + uint256(uint256(randomNumber) % range);
+    }
+
+    // unwrap and send back to user the amount paid twice
+    function doubleReward(
+        address user,
+        uint64 sequenceNumber,
+        uint256 finalNumber
+    ) internal {
+        uint256 amount = AMOUNT * 2;
+
+        WXTZ.withdraw(AMOUNT);
+        (bool sent, ) = payable(user).call{value: amount}("");
+        if (!sent) revert FailedToSendXTZ();
+        emit DoubleWin(user, sequenceNumber, finalNumber, amount);
+    }
+
+    // swap and send the token
+    function swap(
+        address user,
+        uint64 sequenceNumber,
+        uint256 finalNumber
+    ) internal {
+        address tokenOut = (finalNumber <= 50) ? address(USDC) : address(WETH);
+        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter
+            .ExactInputSingleParams({
+                tokenIn: address(WXTZ),
+                tokenOut: tokenOut,
+                fee: poolFee,
+                recipient: user,
+                deadline: block.timestamp,
+                amountIn: AMOUNT,
+                amountOutMinimum: 0,
+                sqrtPriceLimitX96: 0
+            });
+
+        uint256 amountOut = swapRouter.exactInputSingle(params);
+        emit Swap(user, sequenceNumber, finalNumber, tokenOut, amountOut);
     }
 }
