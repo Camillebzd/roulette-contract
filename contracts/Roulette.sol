@@ -118,7 +118,7 @@ contract Roulette is IEntropyConsumer {
 
         if (finalNumber <= 10) {
             emit Lost(user, sequenceNumber, finalNumber);
-        } else if (finalNumber >= 90) {
+        } else if (finalNumber > 90) {
             doubleReward(user, sequenceNumber, finalNumber);
         } else {
             swap(user, sequenceNumber, finalNumber);
@@ -178,7 +178,7 @@ contract Roulette is IEntropyConsumer {
                 recipient: user,
                 deadline: block.timestamp,
                 amountIn: AMOUNT,
-                amountOutMinimum: 0,
+                amountOutMinimum: 0, // keep it for test
                 sqrtPriceLimitX96: 0
             });
 
