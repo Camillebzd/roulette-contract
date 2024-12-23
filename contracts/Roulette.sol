@@ -7,6 +7,7 @@ import {IEntropy} from "@pythnetwork/entropy-sdk-solidity/IEntropy.sol";
 
 // openzeppelin
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 // iswap router
 import {ISwapRouter} from "./interfaces/ISwapRouter.sol";
@@ -17,7 +18,7 @@ import {IWXTZ} from "./interfaces/IWXTZ.sol";
 // Uncomment this line to use console.log
 // import "hardhat/console.sol";
 
-contract Roulette is IEntropyConsumer {
+contract Roulette is IEntropyConsumer, Ownable {
     uint256 public constant AMOUNT = 1 ether;
 
     IEntropy public entropy;
@@ -66,7 +67,7 @@ contract Roulette is IEntropyConsumer {
         address _wxtz,
         address _usdc,
         address _weth
-    ) {
+    ) Ownable(msg.sender) {
         entropy = IEntropy(entropyAddress);
         entropyProvider = entropy.getDefaultProvider();
         swapRouter = ISwapRouter(router);
@@ -78,6 +79,11 @@ contract Roulette is IEntropyConsumer {
     }
 
     receive() external payable {}
+
+    function withdrawFunds() external onlyOwner {
+        (bool success, ) = owner().call{value: address(this).balance}("");
+        if (!success) revert FailedToSendXTZ();
+    }
 
     function spin(bytes32 userRandomNumber) external payable returns (uint64) {
         // Pyth fees
@@ -117,6 +123,7 @@ contract Roulette is IEntropyConsumer {
         address user = users[sequenceNumber];
 
         if (finalNumber <= 10) {
+            WXTZ.withdraw(AMOUNT);
             emit Lost(user, sequenceNumber, finalNumber);
         } else if (finalNumber > 90) {
             doubleReward(user, sequenceNumber, finalNumber);

@@ -8,13 +8,17 @@ import hre from "hardhat";
 import * as helpers from "@nomicfoundation/hardhat-network-helpers";
 import { Roulette } from "../typechain-types";
 
+// All the test rely on testTriggerCallback method because we can't mock Pyth Entropy provider,
+// be sure to uncomment it in the contract before running the tests.
+// It is also easier to test here because we are triggering the method so we don't have to set
+// up a listener and wait for the provider to send the transaction.
 describe("Roulette", function () {
   // We define a fixture to reuse the same setup in every test.
   // We use loadFixture to run this setup once, snapshot that state,
   // and reset Hardhat Network to that snapshot in every test.
   async function deployFixture() {
     // Contracts are deployed using the first signer/account by default
-    const [owner] = await hre.ethers.getSigners();
+    const [owner, otherUser] = await hre.ethers.getSigners();
 
     // /!\ Needed to make the fork works
     await helpers.mine();
@@ -35,7 +39,7 @@ describe("Roulette", function () {
       wethAddress
     );
 
-    return { owner, roulette, wxtz, usdc, weth };
+    return { owner, otherUser, roulette, wxtz, usdc, weth };
   }
 
   describe("Deployment", function () {
@@ -47,6 +51,12 @@ describe("Roulette", function () {
       expect(await roulette.WETH()).to.equal(await weth.getAddress());
       expect(await roulette.entropy()).to.not.equal(hre.ethers.ZeroAddress);
       expect(await roulette.entropyProvider()).to.not.equal(hre.ethers.ZeroAddress);
+    });
+
+    it("Should set the owner", async function () {
+      const { owner, roulette } = await loadFixture(deployFixture);
+
+      expect(await roulette.owner()).to.equal(owner.address);
     });
   });
 
@@ -65,7 +75,7 @@ describe("Roulette", function () {
       const { roulette } = await loadFixture(deployFixture);
       const userRandomNumber = hre.ethers.randomBytes(32);
 
-      await expect(roulette.spin(userRandomNumber, { value: 0 })).to.be.revertedWithCustomError(roulette, "NotRightAmount()")
+      await expect(roulette.spin(userRandomNumber, { value: 0 })).to.be.revertedWithCustomError(roulette, "NotRightAmount()");
     });
 
 
@@ -143,7 +153,7 @@ describe("Roulette", function () {
         expect(await weth.balanceOf(owner.address)).to.be.greaterThan(userWETHBalanceBefore);
       });
 
-      it("Should emit lost and not affect token balances", async function () {
+      it("Should emit lost and not affect user's token balances", async function () {
         const { owner, roulette, weth, usdc } = await loadFixture(deployFixture);
         const { receipt: spinReceipt } = await spinRoulette(roulette);
 
@@ -163,6 +173,9 @@ describe("Roulette", function () {
         const userWETHBalanceBefore = await weth.balanceOf(owner.address);
         const userUSDCBalanceBefore = await usdc.balanceOf(owner.address);
         const userBalanceBefore = await hre.ethers.provider.getBalance(owner.address);
+
+        // Get contract balance before
+        const rouletteBalanceBefore = await hre.ethers.provider.getBalance(await roulette.getAddress());
 
         // Prepare callback with a losing random number (1)
         const randomNumber = 1;
@@ -196,6 +209,10 @@ describe("Roulette", function () {
         const expectedBalance = userBalanceBefore - gasCost;
 
         expect(userBalanceAfter).to.equals(expectedBalance);
+
+        // Check contract balance after
+        const rouletteBalanceAfter = await hre.ethers.provider.getBalance(await roulette.getAddress());
+        expect(rouletteBalanceAfter).to.equals(rouletteBalanceBefore + await roulette.AMOUNT());
       });
 
 
@@ -253,6 +270,55 @@ describe("Roulette", function () {
         // Assert the final balance
         expect(userBalanceAfter).to.equals(expectedBalance);
       });
+    });
+  });
+  describe("Withdraw", function () {
+    it("Should allow owner to withdraw funds", async function () {
+      const { owner, roulette } = await loadFixture(deployFixture);
+      const amountDeposited = hre.ethers.parseEther("10");
+
+      // Fund the contract
+      await (await owner.sendTransaction({
+        to: await roulette.getAddress(),
+        value: amountDeposited,
+      })).wait();
+
+      const ownerBalanceBefore = await hre.ethers.provider.getBalance(owner.address);
+
+      const tx = await roulette.withdrawFunds();
+      const receipt = await tx.wait();  // Wait for the transaction to be mined
+
+      if (!receipt) {
+        console.log("Error: receipt empty");
+        return;
+      }
+
+      // Calculate gas cost
+      const gasUsed = receipt.gasUsed;
+      const gasPrice = receipt.gasPrice;  // Accurate gas price used
+      const gasCost = gasUsed * gasPrice;
+
+      const ownerBalanceAfter = await hre.ethers.provider.getBalance(owner.address);
+      const expectedBalance = ownerBalanceBefore - gasCost + amountDeposited;
+
+      expect(ownerBalanceAfter).to.equals(expectedBalance);
+    });
+
+    it("Should revert if non owner tries to withdraw funds", async function () {
+      const { owner, otherUser, roulette } = await loadFixture(deployFixture);
+      const amountDeposited = hre.ethers.parseEther("10");
+
+      // Fund the contract
+      await (await owner.sendTransaction({
+        to: await roulette.getAddress(),
+        value: amountDeposited,
+      })).wait();
+
+      await expect(roulette.connect(otherUser).withdrawFunds()).to.be.revertedWithCustomError(roulette, `OwnableUnauthorizedAccount(address)`);
+
+      const rouletteBalanceAfter = await hre.ethers.provider.getBalance(await roulette.getAddress());
+
+      expect(rouletteBalanceAfter).to.equals(amountDeposited);
     });
   });
 });
